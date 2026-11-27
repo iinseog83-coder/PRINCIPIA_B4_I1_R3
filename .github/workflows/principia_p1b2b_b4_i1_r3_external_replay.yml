@@ -1,0 +1,411 @@
+# ==============================================================================
+# PRINCIPIA Ω-CELL-C1-P1B2B-B4 — ACT-I1 R3 External Independent Linux 3-Job Replay
+# Destination in Approved GitHub Repo:
+#   .github/workflows/principia_p1b2b_b4_i1_r3_external_replay.yml
+#
+# Architecture (3-Job Disjoint Linux VMs + Dedicated Non-Sudo Principal Isolation):
+#   - Job 1 (`external_linux_replay_RE1`): Fresh `ubuntu-latest` VM #1, locks unpacked
+#     baseline at `/opt/principia_b4_i1_r3_locked_bundle` (`root:root`, dirs `0555`,
+#     files `0444`), creates dedicated unprivileged user `principia_verifier` (no sudo),
+#     verifies 5 kernel `EACCES`/`EPERM` denial probes, and runs 9-package cold replay
+#     + 21 calibrations strictly as `principia_verifier`.
+#   - Job 2 (`external_linux_replay_RE2`): Fresh `ubuntu-latest` VM #2 (parallel, zero
+#     shared filesystem or build cache with VM #1), identical principal isolation +
+#     9-package cold replay + 21 calibrations as `principia_verifier`.
+#   - Job 3 (`external_closure_authority_vm`): Fresh `ubuntu-latest` VM #3 with
+#     `needs: [external_linux_replay_RE1, external_linux_replay_RE2]` and `if: always()`,
+#     collects all artifacts (preserving failure evidence without false authority if any
+#     predecessor failed), enforces `CanSem(RL1)==CanSem(RL2)==CanSem(RE1)==CanSem(RE2)`,
+#     and uploads unified artifact `principia-p1b2b-b4-i1-r3-external-replay-evidence`.
+# ==============================================================================
+
+name: "PRINCIPIA P1B2B-B4 ACT-I1 R3 External Independent 3-Job Replay"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_zip_path:
+        description: "Relative path in repository to unmodified B4 ACT-I1 R3 External Verification ZIP"
+        required: true
+        default: "PRINCIPIA_OMEGA_CELL_C1_P1B2B_B4_I1_R3_EXTERNAL_VERIFICATION_PACKAGE.zip"
+        type: string
+      expected_bundle_zip_sha256:
+        description: "Optional expected SHA-256 of outer B4 I1 R3 Bundle ZIP (verified if non-empty)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PINNED_LEAN_TOOLCHAIN: "leanprover/lean4:v4.33.1"
+  EXPECTED_H_S_SHA256: "CAA403832CAA2488B7138BF5CC82B532F3A9D96EDA927CAF775EDABDA728B219"
+  EXPECTED_H_E_R3_SHA256: "F975A023918DD08D0FE4534D7BADBAB6EF06D28DFB15CCA79274D689962DB680"
+  EXPECTED_H_O_R3_SHA256: "3CC2BFA644F98FF44F9A1C45F6B6CEC744515AC986E126E028F87F313286CDB2"
+  EXPECTED_R0_ORACLE_SHA256: "DF4657BC51D6E68552A62C6384B7A01C6B850F4BE7C40FC8C07C4FBB4FC5790A"
+  EXPECTED_R1_ORACLE_SHA256: "BF4B7D5BFF771967F024FEE230382913E7DD32BA561FCE2FDDE03DF822C683EB"
+  EXPECTED_R2_ORACLE_SHA256: "E45073B5B6C4F336E2DCE704484DE6EEBC5E92655FCDDD75D9659AC8E4CB00CB"
+  EXPECTED_A1_CMTO_AUDIT_SHA256: "45E5985B315A19744A9C7411515D9E6ECBAB46BCE07EC3C78591D7FA82EFD4EA"
+  EXPECTED_LOCAL_CANSEM_SHA256: "34D07B762DE5D3FE1DC0A22FC2F4A554BF591061ED66FDF31FE34A282BB5C3EE"
+
+jobs:
+  external_linux_replay_RE1:
+    name: "VM-1: Detached Linux 9-Pkg Cold Replay RE1 (Unprivileged principia_verifier)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: "1. Checkout Repository (Read-Only)"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: "2. Provision Python 3.12"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "3. Initialize Evidence Dir & Snapshot Executed Workflow"
+        id: init_ev
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="${RUNNER_TEMP}/principia_b4_i1_r3_re1_out"
+          rm -rf "${EVIDENCE_DIR}"
+          mkdir -p "${EVIDENCE_DIR}"
+          echo "evidence_dir=${EVIDENCE_DIR}" >> "${GITHUB_OUTPUT}"
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE1.txt"
+          echo "=== [RE1 STEP 3] WORKFLOW SNAPSHOT & VM HOST INFO ===" > "${IMMUT_LOG}"
+          echo "UTC Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${IMMUT_LOG}"
+          echo "Runner Hostname/Kernel: $(hostname) | $(uname -s -m -r)" >> "${IMMUT_LOG}"
+          WF_CANDIDATE="${GITHUB_WORKSPACE}/.github/workflows/principia_p1b2b_b4_i1_r3_external_replay.yml"
+          if [[ ! -f "${WF_CANDIDATE}" ]]; then
+            WF_REL="$(echo "${GITHUB_WORKFLOW_REF:-}" | sed -E 's#^[^/]+/[^/]+/##; s#@.*$##')"
+            if [[ -n "${WF_REL}" ]] && [[ -f "${GITHUB_WORKSPACE}/${WF_REL}" ]]; then
+              WF_CANDIDATE="${GITHUB_WORKSPACE}/${WF_REL}"
+            fi
+          fi
+          cp -p "${WF_CANDIDATE}" "${EVIDENCE_DIR}/executed_workflow_snapshot.yml"
+          EXEC_WF_BYTES="$(stat -c%s "${EVIDENCE_DIR}/executed_workflow_snapshot.yml")"
+          EXEC_WF_SHA="$(sha256sum "${EVIDENCE_DIR}/executed_workflow_snapshot.yml" | awk '{print toupper($1)}')"
+          echo "Executed Workflow Bytes : ${EXEC_WF_BYTES}" | tee -a "${IMMUT_LOG}"
+          echo "Executed Workflow SHA256: ${EXEC_WF_SHA}" | tee -a "${IMMUT_LOG}"
+          echo "exec_wf_bytes=${EXEC_WF_BYTES}" >> "${GITHUB_OUTPUT}"
+          echo "exec_wf_sha=${EXEC_WF_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: "4. Unpack Bundle to /opt, Verify Manifests & Lock as root:root 0555/0444"
+        id: preflight
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.init_ev.outputs.evidence_dir }}
+          EXEC_WF_SHA: ${{ steps.init_ev.outputs.exec_wf_sha }}
+          INPUT_BUNDLE_REL: ${{ inputs.bundle_zip_path }}
+          INPUT_BUNDLE_SHA: ${{ inputs.expected_bundle_zip_sha256 }}
+        run: |
+          set -euo pipefail
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE1.txt"
+          BUNDLE_FILE="${GITHUB_WORKSPACE}/${INPUT_BUNDLE_REL}"
+          test -f "${BUNDLE_FILE}"
+          ACTUAL_ZIP_SHA="$(sha256sum "${BUNDLE_FILE}" | awk '{print toupper($1)}')"
+          echo "Outer ZIP SHA256: ${ACTUAL_ZIP_SHA}" | tee -a "${IMMUT_LOG}"
+          TARGET_SHA="$(echo "${INPUT_BUNDLE_SHA}" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+          if [[ -n "${TARGET_SHA}" ]] && [[ "${ACTUAL_ZIP_SHA}" != "${TARGET_SHA}" ]]; then
+            echo "FAIL: Outer ZIP SHA256 mismatch!" | tee -a "${IMMUT_LOG}"
+            exit 1
+          fi
+          LOCKED_ROOT="/opt/principia_b4_i1_r3_locked_bundle"
+          sudo rm -rf "${LOCKED_ROOT}"
+          sudo mkdir -p "${LOCKED_ROOT}"
+          sudo unzip -q "${BUNDLE_FILE}" -d "${LOCKED_ROOT}"
+          (cd "${LOCKED_ROOT}" && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          BUNDLED_WF="${LOCKED_ROOT}/GitHub_Actions_Workflow/principia_p1b2b_b4_i1_r3_external_replay.yml"
+          BUNDLED_WF_SHA="$(sha256sum "${BUNDLED_WF}" | awk '{print toupper($1)}')"
+          echo "Bundled Workflow SHA256: ${BUNDLED_WF_SHA}" | tee -a "${IMMUT_LOG}"
+          test "${EXEC_WF_SHA}" = "${BUNDLED_WF_SHA}"
+          ACTUAL_H_S="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/manifest_active_replay_74_sources.json" | awk '{print toupper($1)}')"
+          ACTUAL_H_E="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/b4_i1_r3_environment_and_cansem_spec.json" | awk '{print toupper($1)}')"
+          ACTUAL_H_O="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/b4_i1_r3_precommitted_oracle.json" | awk '{print toupper($1)}')"
+          test "${ACTUAL_H_S}" = "${EXPECTED_H_S_SHA256}"
+          test "${ACTUAL_H_E}" = "${EXPECTED_H_E_R3_SHA256}"
+          test "${ACTUAL_H_O}" = "${EXPECTED_H_O_R3_SHA256}"
+          sudo chown -R root:root "${LOCKED_ROOT}"
+          sudo find "${LOCKED_ROOT}" -type d -exec chmod 0555 {} +
+          sudo find "${LOCKED_ROOT}" -type f -exec chmod 0444 {} +
+
+      - name: "5. Provision Non-Sudo User principia_verifier, Install Lean 4.33.1 & Run 5 Kernel Isolation Probes"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! id -u principia_verifier >/dev/null 2>&1; then
+            sudo useradd -m -d /home/principia_verifier -s /bin/bash principia_verifier
+          fi
+          sudo chmod 0755 /home/principia_verifier
+          cd /home/principia_verifier
+          sudo -u principia_verifier -H mkdir -p /home/principia_verifier/evidence_out
+          sudo -u principia_verifier -H bash -c 'cd "$HOME" && curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain "leanprover/lean4:v4.33.1"'
+          sudo -u principia_verifier -H bash -c 'cd "$HOME" && export PATH="$HOME/.elan/bin:$PATH" && lean --version > /home/principia_verifier/evidence_out/lean_toolchain_RE1.txt && lake --version >> /home/principia_verifier/evidence_out/lean_toolchain_RE1.txt'
+          sudo -u principia_verifier -H env PYTHONDONTWRITEBYTECODE=1 python3 -B             /opt/principia_b4_i1_r3_locked_bundle/linux_ci_helpers/run_linux_principal_isolation_probe.py             --replay-id RE1             --locked-bundle-root /opt/principia_b4_i1_r3_locked_bundle             --out-json /home/principia_verifier/evidence_out/linux_principal_isolation_RE1.json
+
+      - name: "6. Execute Isolated 9-Package Cold Replay RE1 + 21 Calibrations as principia_verifier"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/principia_verifier
+          sudo -u principia_verifier -H env PYTHONDONTWRITEBYTECODE=1 python3 -B             /opt/principia_b4_i1_r3_locked_bundle/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/run_verify_b4_i1_r3.py             --mode single-replay             --replay-id RE1             --attempt-id "${GITHUB_RUN_ID}_ATTEMPT_${GITHUB_RUN_ATTEMPT}"             --source-root /opt/principia_b4_i1_r3_locked_bundle             --evidence-dir /home/principia_verifier/evidence_out             --r0-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_precommitted_oracle.json             --r1-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_r1_precommitted_oracle.json             --r2-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_r2_precommitted_oracle.json             --a1-audit-receipt-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/i1_r3_a1_cmto_independent_audit_receipt.json             --expected-local-cansem-sha256 "${EXPECTED_LOCAL_CANSEM_SHA256}"
+
+      - name: "7. Collect RE1 Evidence & Post-Run Locked Bundle Immutability Check"
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.init_ev.outputs.evidence_dir }}
+        run: |
+          set -euo pipefail
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE1.txt"
+          if [[ -d /home/principia_verifier/evidence_out ]]; then
+            cp -r /home/principia_verifier/evidence_out/. "${EVIDENCE_DIR}/" || true
+          fi
+          if [[ -f /opt/principia_b4_i1_r3_locked_bundle/bundle_manifest.sha256 ]]; then
+            echo "=== [RE1 POST-RUN] LOCKED BUNDLE IMMUTABILITY RE-CHECK ===" >> "${IMMUT_LOG}"
+            (cd /opt/principia_b4_i1_r3_locked_bundle && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          fi
+
+      - name: "8. Upload RE1 Evidence Artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: principia-b4-i1-r3-re1-evidence
+          path: ${{ steps.init_ev.outputs.evidence_dir }}/*
+          if-no-files-found: error
+          retention-days: 90
+
+  external_linux_replay_RE2:
+    name: "VM-2: Detached Linux 9-Pkg Cold Replay RE2 (Unprivileged principia_verifier)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: "1. Checkout Repository (Read-Only)"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: "2. Provision Python 3.12"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "3. Initialize Evidence Dir & Snapshot Executed Workflow"
+        id: init_ev
+        shell: bash
+        run: |
+          set -euo pipefail
+          EVIDENCE_DIR="${RUNNER_TEMP}/principia_b4_i1_r3_re2_out"
+          rm -rf "${EVIDENCE_DIR}"
+          mkdir -p "${EVIDENCE_DIR}"
+          echo "evidence_dir=${EVIDENCE_DIR}" >> "${GITHUB_OUTPUT}"
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE2.txt"
+          echo "=== [RE2 STEP 3] WORKFLOW SNAPSHOT & VM HOST INFO ===" > "${IMMUT_LOG}"
+          echo "UTC Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${IMMUT_LOG}"
+          echo "Runner Hostname/Kernel: $(hostname) | $(uname -s -m -r)" >> "${IMMUT_LOG}"
+          WF_CANDIDATE="${GITHUB_WORKSPACE}/.github/workflows/principia_p1b2b_b4_i1_r3_external_replay.yml"
+          if [[ ! -f "${WF_CANDIDATE}" ]]; then
+            WF_REL="$(echo "${GITHUB_WORKFLOW_REF:-}" | sed -E 's#^[^/]+/[^/]+/##; s#@.*$##')"
+            if [[ -n "${WF_REL}" ]] && [[ -f "${GITHUB_WORKSPACE}/${WF_REL}" ]]; then
+              WF_CANDIDATE="${GITHUB_WORKSPACE}/${WF_REL}"
+            fi
+          fi
+          cp -p "${WF_CANDIDATE}" "${EVIDENCE_DIR}/executed_workflow_snapshot.yml"
+          EXEC_WF_BYTES="$(stat -c%s "${EVIDENCE_DIR}/executed_workflow_snapshot.yml")"
+          EXEC_WF_SHA="$(sha256sum "${EVIDENCE_DIR}/executed_workflow_snapshot.yml" | awk '{print toupper($1)}')"
+          echo "Executed Workflow Bytes : ${EXEC_WF_BYTES}" | tee -a "${IMMUT_LOG}"
+          echo "Executed Workflow SHA256: ${EXEC_WF_SHA}" | tee -a "${IMMUT_LOG}"
+          echo "exec_wf_bytes=${EXEC_WF_BYTES}" >> "${GITHUB_OUTPUT}"
+          echo "exec_wf_sha=${EXEC_WF_SHA}" >> "${GITHUB_OUTPUT}"
+
+      - name: "4. Unpack Bundle to /opt, Verify Manifests & Lock as root:root 0555/0444"
+        id: preflight
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.init_ev.outputs.evidence_dir }}
+          EXEC_WF_SHA: ${{ steps.init_ev.outputs.exec_wf_sha }}
+          INPUT_BUNDLE_REL: ${{ inputs.bundle_zip_path }}
+          INPUT_BUNDLE_SHA: ${{ inputs.expected_bundle_zip_sha256 }}
+        run: |
+          set -euo pipefail
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE2.txt"
+          BUNDLE_FILE="${GITHUB_WORKSPACE}/${INPUT_BUNDLE_REL}"
+          test -f "${BUNDLE_FILE}"
+          ACTUAL_ZIP_SHA="$(sha256sum "${BUNDLE_FILE}" | awk '{print toupper($1)}')"
+          echo "Outer ZIP SHA256: ${ACTUAL_ZIP_SHA}" | tee -a "${IMMUT_LOG}"
+          TARGET_SHA="$(echo "${INPUT_BUNDLE_SHA}" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')"
+          if [[ -n "${TARGET_SHA}" ]] && [[ "${ACTUAL_ZIP_SHA}" != "${TARGET_SHA}" ]]; then
+            echo "FAIL: Outer ZIP SHA256 mismatch!" | tee -a "${IMMUT_LOG}"
+            exit 1
+          fi
+          LOCKED_ROOT="/opt/principia_b4_i1_r3_locked_bundle"
+          sudo rm -rf "${LOCKED_ROOT}"
+          sudo mkdir -p "${LOCKED_ROOT}"
+          sudo unzip -q "${BUNDLE_FILE}" -d "${LOCKED_ROOT}"
+          (cd "${LOCKED_ROOT}" && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          BUNDLED_WF="${LOCKED_ROOT}/GitHub_Actions_Workflow/principia_p1b2b_b4_i1_r3_external_replay.yml"
+          BUNDLED_WF_SHA="$(sha256sum "${BUNDLED_WF}" | awk '{print toupper($1)}')"
+          echo "Bundled Workflow SHA256: ${BUNDLED_WF_SHA}" | tee -a "${IMMUT_LOG}"
+          test "${EXEC_WF_SHA}" = "${BUNDLED_WF_SHA}"
+          ACTUAL_H_S="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/manifest_active_replay_74_sources.json" | awk '{print toupper($1)}')"
+          ACTUAL_H_E="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/b4_i1_r3_environment_and_cansem_spec.json" | awk '{print toupper($1)}')"
+          ACTUAL_H_O="$(sha256sum "${LOCKED_ROOT}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/b4_i1_r3_precommitted_oracle.json" | awk '{print toupper($1)}')"
+          test "${ACTUAL_H_S}" = "${EXPECTED_H_S_SHA256}"
+          test "${ACTUAL_H_E}" = "${EXPECTED_H_E_R3_SHA256}"
+          test "${ACTUAL_H_O}" = "${EXPECTED_H_O_R3_SHA256}"
+          sudo chown -R root:root "${LOCKED_ROOT}"
+          sudo find "${LOCKED_ROOT}" -type d -exec chmod 0555 {} +
+          sudo find "${LOCKED_ROOT}" -type f -exec chmod 0444 {} +
+
+      - name: "5. Provision Non-Sudo User principia_verifier, Install Lean 4.33.1 & Run 5 Kernel Isolation Probes"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! id -u principia_verifier >/dev/null 2>&1; then
+            sudo useradd -m -d /home/principia_verifier -s /bin/bash principia_verifier
+          fi
+          sudo chmod 0755 /home/principia_verifier
+          cd /home/principia_verifier
+          sudo -u principia_verifier -H mkdir -p /home/principia_verifier/evidence_out
+          sudo -u principia_verifier -H bash -c 'cd "$HOME" && curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain "leanprover/lean4:v4.33.1"'
+          sudo -u principia_verifier -H bash -c 'cd "$HOME" && export PATH="$HOME/.elan/bin:$PATH" && lean --version > /home/principia_verifier/evidence_out/lean_toolchain_RE2.txt && lake --version >> /home/principia_verifier/evidence_out/lean_toolchain_RE2.txt'
+          sudo -u principia_verifier -H env PYTHONDONTWRITEBYTECODE=1 python3 -B             /opt/principia_b4_i1_r3_locked_bundle/linux_ci_helpers/run_linux_principal_isolation_probe.py             --replay-id RE2             --locked-bundle-root /opt/principia_b4_i1_r3_locked_bundle             --out-json /home/principia_verifier/evidence_out/linux_principal_isolation_RE2.json
+
+      - name: "6. Execute Isolated 9-Package Cold Replay RE2 + 21 Calibrations as principia_verifier"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /home/principia_verifier
+          sudo -u principia_verifier -H env PYTHONDONTWRITEBYTECODE=1 python3 -B             /opt/principia_b4_i1_r3_locked_bundle/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/run_verify_b4_i1_r3.py             --mode single-replay             --replay-id RE2             --attempt-id "${GITHUB_RUN_ID}_ATTEMPT_${GITHUB_RUN_ATTEMPT}"             --source-root /opt/principia_b4_i1_r3_locked_bundle             --evidence-dir /home/principia_verifier/evidence_out             --r0-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_precommitted_oracle.json             --r1-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_r1_precommitted_oracle.json             --r2-oracle-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/b4_i1_r2_precommitted_oracle.json             --a1-audit-receipt-path /opt/principia_b4_i1_r3_locked_bundle/preserved_lineage_anchors/i1_r3_a1_cmto_independent_audit_receipt.json             --expected-local-cansem-sha256 "${EXPECTED_LOCAL_CANSEM_SHA256}"
+
+      - name: "7. Collect RE2 Evidence & Post-Run Locked Bundle Immutability Check"
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ steps.init_ev.outputs.evidence_dir }}
+        run: |
+          set -euo pipefail
+          IMMUT_LOG="${EVIDENCE_DIR}/pre_and_post_immutability_RE2.txt"
+          if [[ -d /home/principia_verifier/evidence_out ]]; then
+            cp -r /home/principia_verifier/evidence_out/. "${EVIDENCE_DIR}/" || true
+          fi
+          if [[ -f /opt/principia_b4_i1_r3_locked_bundle/bundle_manifest.sha256 ]]; then
+            echo "=== [RE2 POST-RUN] LOCKED BUNDLE IMMUTABILITY RE-CHECK ===" >> "${IMMUT_LOG}"
+            (cd /opt/principia_b4_i1_r3_locked_bundle && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          fi
+
+      - name: "8. Upload RE2 Evidence Artifact"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: principia-b4-i1-r3-re2-evidence
+          path: ${{ steps.init_ev.outputs.evidence_dir }}/*
+          if-no-files-found: error
+          retention-days: 90
+
+  external_closure_authority_vm:
+    name: "VM-3: Detached Closure Verifier (Quad-CanSem & Evidence Collection)"
+    needs: [external_linux_replay_RE1, external_linux_replay_RE2]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "1. Checkout Repository (Read-Only)"
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: "2. Provision Python 3.12"
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: "3. Download RE1 Artifact"
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: principia-b4-i1-r3-re1-evidence
+          path: ${{ runner.temp }}/principia_b4_i1_r3_closure/re1_in
+
+      - name: "4. Download RE2 Artifact"
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: principia-b4-i1-r3-re2-evidence
+          path: ${{ runner.temp }}/principia_b4_i1_r3_closure/re2_in
+
+      - name: "5. Install Pinned Lean 4.33.1 via elan"
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain "${PINNED_LEAN_TOOLCHAIN}"
+
+      - name: "6. Unpack Bundle, Snapshot Workflow & Execute Closure Verification"
+        id: closure_exec
+        shell: bash
+        env:
+          INPUT_BUNDLE_REL: ${{ inputs.bundle_zip_path }}
+          RE1_RESULT: ${{ needs.external_linux_replay_RE1.result }}
+          RE2_RESULT: ${{ needs.external_linux_replay_RE2.result }}
+        run: |
+          set -euo pipefail
+          export PATH="${HOME}/.elan/bin:${PATH}"
+          CLOS_ROOT="${RUNNER_TEMP}/principia_b4_i1_r3_closure"
+          FINAL_EV="${CLOS_ROOT}/final_evidence_bundle"
+          UNPACK_DIR="/opt/principia_b4_i1_r3_closure_bundle"
+          mkdir -p "${FINAL_EV}/re1" "${FINAL_EV}/re2" "${CLOS_ROOT}/re1_in" "${CLOS_ROOT}/re2_in"
+          echo "final_ev=${FINAL_EV}" >> "${GITHUB_OUTPUT}"
+          cp -r "${CLOS_ROOT}/re1_in/." "${FINAL_EV}/re1/" || true
+          cp -r "${CLOS_ROOT}/re2_in/." "${FINAL_EV}/re2/" || true
+          IMMUT_LOG="${FINAL_EV}/pre_and_post_immutability_check.txt"
+          echo "=== [CLOSURE VM] WORKFLOW & BUNDLE VERIFICATION ===" > "${IMMUT_LOG}"
+          echo "UTC Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${IMMUT_LOG}"
+          echo "Predecessor Job Results: RE1=${RE1_RESULT} | RE2=${RE2_RESULT}" >> "${IMMUT_LOG}"
+          WF_CANDIDATE="${GITHUB_WORKSPACE}/.github/workflows/principia_p1b2b_b4_i1_r3_external_replay.yml"
+          if [[ ! -f "${WF_CANDIDATE}" ]]; then
+            WF_REL="$(echo "${GITHUB_WORKFLOW_REF:-}" | sed -E 's#^[^/]+/[^/]+/##; s#@.*$##')"
+            if [[ -n "${WF_REL}" ]] && [[ -f "${GITHUB_WORKSPACE}/${WF_REL}" ]]; then
+              WF_CANDIDATE="${GITHUB_WORKSPACE}/${WF_REL}"
+            fi
+          fi
+          cp -p "${WF_CANDIDATE}" "${FINAL_EV}/executed_workflow_snapshot.yml"
+          EXEC_WF_BYTES="$(stat -c%s "${FINAL_EV}/executed_workflow_snapshot.yml")"
+          EXEC_WF_SHA="$(sha256sum "${FINAL_EV}/executed_workflow_snapshot.yml" | awk '{print toupper($1)}')"
+          sudo rm -rf "${UNPACK_DIR}"
+          sudo mkdir -p "${UNPACK_DIR}"
+          sudo unzip -q "${GITHUB_WORKSPACE}/${INPUT_BUNDLE_REL}" -d "${UNPACK_DIR}"
+          (cd "${UNPACK_DIR}" && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          BUNDLED_WF_SHA="$(sha256sum "${UNPACK_DIR}/GitHub_Actions_Workflow/principia_p1b2b_b4_i1_r3_external_replay.yml" | awk '{print toupper($1)}')"
+          set +e
+          PYTHONDONTWRITEBYTECODE=1 python3 -B             "${UNPACK_DIR}/research/principia_omega_cell_c1_p1b2b_b4_i1_verify_kit_r3/run_verify_b4_i1_r3.py"             --mode verify-external-pair             --source-root "${UNPACK_DIR}"             --evidence-dir "${FINAL_EV}"             --r0-oracle-path "${UNPACK_DIR}/preserved_lineage_anchors/b4_i1_precommitted_oracle.json"             --r1-oracle-path "${UNPACK_DIR}/preserved_lineage_anchors/b4_i1_r1_precommitted_oracle.json"             --r2-oracle-path "${UNPACK_DIR}/preserved_lineage_anchors/b4_i1_r2_precommitted_oracle.json"             --a1-audit-receipt-path "${UNPACK_DIR}/preserved_lineage_anchors/i1_r3_a1_cmto_independent_audit_receipt.json"             --re1-dir "${CLOS_ROOT}/re1_in"             --re2-dir "${CLOS_ROOT}/re2_in"             --expected-local-cansem-sha256 "${EXPECTED_LOCAL_CANSEM_SHA256}"             --executed-workflow-sha256 "${EXEC_WF_SHA}"             --executed-workflow-bytes "${EXEC_WF_BYTES}"             --bundled-workflow-sha256 "${BUNDLED_WF_SHA}"
+          CLOSURE_RC=$?
+          set -e
+          echo "closure_rc=${CLOSURE_RC}" >> "${GITHUB_OUTPUT}"
+          (cd "${UNPACK_DIR}" && sha256sum -c bundle_manifest.sha256) >> "${IMMUT_LOG}"
+          (cd "${FINAL_EV}" && find . -type f ! -name 'artifact_bundle_manifest.sha256' | LC_ALL=C sort | sed 's#^\./##' | xargs sha256sum > artifact_bundle_manifest.sha256)
+
+      - name: "7. Upload Unified External Replay Closure Evidence Bundle"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: principia-p1b2b-b4-i1-r3-external-replay-evidence
+          path: ${{ steps.closure_exec.outputs.final_ev }}/**
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: "8. Enforce Fail-Closed Final Exit Status"
+        if: always()
+        shell: bash
+        env:
+          CLOSURE_RC: ${{ steps.closure_exec.outputs.closure_rc }}
+          RE1_RESULT: ${{ needs.external_linux_replay_RE1.result }}
+          RE2_RESULT: ${{ needs.external_linux_replay_RE2.result }}
+        run: |
+          set -euo pipefail
+          echo "Final Gate Check: RE1=${RE1_RESULT} | RE2=${RE2_RESULT} | CLOSURE_RC=${CLOSURE_RC}"
+          test "${RE1_RESULT}" = "success"
+          test "${RE2_RESULT}" = "success"
+          test "${CLOSURE_RC}" = "0"
